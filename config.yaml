@@ -1,0 +1,31 @@
+# config.yaml
+# Simple configuration for Service Aggregator
+database:
+  path: "services.db"
+  backup_interval_hours: 24
+
+extraction:
+  max_concurrent: 3
+  delay_between_requests: 2
+  timeout_seconds: 30
+
+google_sheets:
+  credentials_file: "credentials.json"
+  default_sheet_name: "Service Plans Data"
+
+admin_interface:
+  port: 8501
+  auto_refresh_minutes: 60
+
+# Known providers for auto-extraction
+providers:
+  mobile:
+    - "https://www.telia.no/mobilabonnement"
+    - "https://www.telenor.no/mobilabonnement/"
+    - "https://www.ice.no/mobil/abonnement"
+  electricity:
+    - "https://www.fortum.no/privat/strom"
+    - "https://www.hafslund.no/privat/strom"
+  internet:
+    - "https://www.telenor.no/privat/bredbånd"
+    - "https://www.telia.no/privat/bredband"
