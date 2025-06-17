@@ -489,11 +489,12 @@ def create_admin_interface():
     
     # Predefined providers
     provider_options = {
-        "Telia Mobile": "https://www.telia.no/privat/mobil/abonnement",
-        "Telenor Mobile": "https://www.telenor.no/privat/mobil/abonnement",
-        "Ice Mobile": "https://www.ice.no/mobil/abonnement",
-        "Fortum Electricity": "https://www.fortum.no/privat/strom",
-        "Hafslund Electricity": "https://www.hafslund.no/privat/strom"
+        "Telia Mobile": "https://www.telia.no/mobilabonnement",
+        "Telenor Mobile": "https://www.telenor.no/mobilabonnement/",
+        "Ice Mobile": "https://www.ice.no/mobilabonnement/",
+		"Talkmore": "https://talkmore.no/privat/abonnement/enkelt/bestill",
+        "Fortum Electricity": "https://www.fortum.com/no/strom/stromavtale",
+        "Forbrukerradet": "https://www.forbrukerradet.no/strompris/"
     }
     
     selected_provider = st.sidebar.selectbox(

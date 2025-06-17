@@ -23,6 +23,7 @@ providers:
     - "https://www.telia.no/mobilabonnement"
     - "https://www.telenor.no/mobilabonnement/"
     - "https://www.ice.no/mobilabonnement/"
+    - "https://talkmore.no/privat/abonnement/enkelt/bestill"
   electricity:
     - "https://www.fortum.com/no/strom/stromavtale"
     - "https://www.forbrukerradet.no/strompris/"
