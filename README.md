@@ -304,7 +304,7 @@ python -c "
 from main import ServiceExtractor
 import asyncio
 extractor = ServiceExtractor()
-plans = asyncio.run(extractor.extract_from_provider('https://www.telia.no/privat/mobil/abonnement'))
+plans = asyncio.run(extractor.extract_from_provider('https://www.examle.com/mobilabonnement'))
 print(f'Extracted {len(plans)} plans')
 print('Success!' if len(plans) >= 3 else 'Failed!')
 "

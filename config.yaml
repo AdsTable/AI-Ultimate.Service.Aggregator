@@ -22,10 +22,10 @@ providers:
   mobile:
     - "https://www.telia.no/mobilabonnement"
     - "https://www.telenor.no/mobilabonnement/"
-    - "https://www.ice.no/mobil/abonnement"
+    - "https://www.ice.no/mobilabonnement/"
   electricity:
-    - "https://www.fortum.no/privat/strom"
-    - "https://www.hafslund.no/privat/strom"
+    - "https://www.fortum.com/no/strom/stromavtale"
+    - "https://www.forbrukerradet.no/strompris/"
   internet:
-    - "https://www.telenor.no/privat/bredbånd"
-    - "https://www.telia.no/privat/bredband"
+    - "https://www.telenor.no/privat/internett/"
+    - "https://www.telia.no/internett/"
