@@ -19,3 +19,19 @@
 - `agents/extraction/content_extractor.py` 
 - `agents/extraction/website_analyzer.py`
 - `agents/extraction/data_synthesizer.py`
+
+**The agents/intelligence directory was planned to contain:**
+
+- Market Intelligence Agent
+- Competitive Analysis Agent
+- Trend Analysis Agent
+- Strategic Insights Generator
+
+**Files to Create:**
+
+- `agents/intelligence/__init__.py` - Package initialization
+- `agents/intelligence/market_intelligence_agent.py` - Complete market intelligence agent
+
+- `agents/intelligence/competitive_analysis_agent.py`
+- `agents/intelligence/trend_analysis_agent.py`
+- `agents/intelligence/insights_orchestrator.py`
