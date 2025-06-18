@@ -29,4 +29,4 @@
 - `agents/discovery/search_engine_agent.py`
 - `agents/discovery/regulatory_scanner.py`
 - `agents/discovery/competitor_analyzer.py`
-- `agents/discovery/social_intelligence_agent.py` - not complete!
+- `agents/discovery/social_intelligence_agent.py`

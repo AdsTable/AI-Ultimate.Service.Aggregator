@@ -1,4 +1,4 @@
-# agents/discovery/social_intelligence_agent.py - not complete!
+# agents/discovery/social_intelligence_agent.py
 """
 Social Intelligence Agent
 
@@ -1580,4 +1580,458 @@ class SocialIntelligenceAgent(BaseAgent):
             candidates_data = [candidate.to_dict() for candidate in candidates]
             await self.redis_client.setex(
                 f"social:{cache_key}",
-                self.config
+                self.config.cache_ttl,
+                json.dumps(candidates_data)
+            )
+            self.logger.debug(f"Cached {len(candidates)} social intelligence candidates")
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to cache social data: {e}")
+    
+    async def _load_social_cache(self):
+        """Load social intelligence cache from persistent storage"""
+        try:
+            if self.redis_client:
+                # Load from Redis if available
+                cache_keys = await self.redis_client.keys("social:*")
+                self.logger.debug(f"Loaded {len(cache_keys)} social cache entries")
+            else:
+                # Initialize empty cache for in-memory usage
+                self.social_cache = {}
+                self.logger.debug("Initialized empty social intelligence cache")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to load social cache: {e}")
+            self.social_cache = {}
+    
+    async def _save_social_cache(self):
+        """Save social intelligence cache to persistent storage"""
+        try:
+            if self.redis_client and self.social_cache:
+                # Save current in-memory cache to Redis
+                for cache_key, data in self.social_cache.items():
+                    await self.redis_client.setex(
+                        f"social:{cache_key}",
+                        self.config.cache_ttl,
+                        json.dumps(data)
+                    )
+                self.logger.debug(f"Saved {len(self.social_cache)} social cache entries")
+                
+        except Exception as e:
+            self.logger.warning(f"Failed to save social cache: {e}")
+    
+    async def _apply_rate_limiting(self, platform: str, rate_limit: float):
+        """Apply respectful rate limiting for social platforms"""
+        try:
+            # Track last request time for this platform
+            last_request_key = f"last_request_{platform}"
+            last_request_time = getattr(self, last_request_key, 0)
+            
+            current_time = time.time()
+            time_since_last = current_time - last_request_time
+            
+            if time_since_last < rate_limit:
+                sleep_time = rate_limit - time_since_last
+                self.logger.debug(f"Rate limiting {platform}: sleeping {sleep_time:.1f}s")
+                await asyncio.sleep(sleep_time)
+            
+            # Update last request time
+            setattr(self, last_request_key, time.time())
+            
+        except Exception as e:
+            self.logger.warning(f"Rate limiting error for {platform}: {e}")
+    
+    def get_intelligence_stats(self) -> Dict[str, Any]:
+        """Get social intelligence performance statistics"""
+        return {
+            'total_searches': self.intelligence_stats['total_searches'],
+            'successful_searches': self.intelligence_stats['successful_searches'],
+            'success_rate': (
+                self.intelligence_stats['successful_searches'] / 
+                max(1, self.intelligence_stats['total_searches'])
+            ) * 100,
+            'platforms_analyzed': self.intelligence_stats['platforms_analyzed'],
+            'providers_discovered': self.intelligence_stats['providers_discovered'],
+            'community_mentions': self.intelligence_stats['community_mentions'],
+            'platform_performance': self.intelligence_stats['platform_performance'],
+            'cache_size': len(self.social_cache) if hasattr(self, 'social_cache') else 0
+        }
+    
+    async def analyze_provider_social_presence(
+        self, 
+        provider_name: str, 
+        website_url: str,
+        target: DiscoveryTarget
+    ) -> Dict[str, Any]:
+        """
+        Analyze social media presence of a specific provider
+        
+        Args:
+            provider_name: Name of the provider to analyze
+            website_url: Provider's website URL
+            target: Discovery target context
+            
+        Returns:
+            Comprehensive social presence analysis
+        """
+        self.logger.info(f"🔍 Analyzing social presence for {provider_name}")
+        
+        analysis_prompt = f"""
+        Analyze the social media presence and digital footprint for {provider_name} ({website_url}).
+        
+        Provider Context:
+        - Provider Name: {provider_name}
+        - Website: {website_url}
+        - Service Category: {target.service_category}
+        - Country: {target.country}
+        
+        Analyze their likely social media presence across platforms:
+        
+        1. **LinkedIn Presence**:
+           - Company page activity level
+           - Executive profiles and thought leadership
+           - Employee advocacy and content sharing
+           - Industry group participation
+        
+        2. **Twitter Activity**:
+           - Business account engagement
+           - Customer service responsiveness
+           - Industry conversation participation
+           - Content strategy and frequency
+        
+        3. **Facebook Business Presence**:
+           - Business page management
+           - Customer reviews and ratings
+           - Local community engagement
+           - Event hosting and participation
+        
+        4. **YouTube Content Strategy**:
+           - Educational content creation
+           - Product demonstrations
+           - Customer testimonials
+           - Industry thought leadership
+        
+        5. **Community Engagement**:
+           - Industry forum participation
+           - Professional community involvement
+           - Customer support in communities
+           - Expert recognition and reputation
+        
+        Return JSON with comprehensive social presence analysis:
+        {{
+          "overall_social_maturity": "high/medium/low",
+          "platform_presence": {{
+            "linkedin": {{
+              "presence_strength": "strong/moderate/weak/none",
+              "activity_indicators": ["company_page", "executive_profiles", "thought_leadership"],
+              "estimated_followers": "range_estimate",
+              "content_focus": ["industry_insights", "company_updates", "hiring"]
+            }},
+            "twitter": {{
+              "presence_strength": "strong/moderate/weak/none",
+              "activity_indicators": ["customer_service", "industry_engagement", "content_sharing"],
+              "estimated_followers": "range_estimate",
+              "engagement_style": "responsive/promotional/educational"
+            }},
+            "facebook": {{
+              "presence_strength": "strong/moderate/weak/none",
+              "activity_indicators": ["business_page", "customer_reviews", "local_events"],
+              "local_focus": "high/medium/low",
+              "review_management": "active/passive/poor"
+            }},
+            "youtube": {{
+              "presence_strength": "strong/moderate/weak/none",
+              "content_types": ["tutorials", "demos", "testimonials", "thought_leadership"],
+              "production_quality": "professional/amateur/none",
+              "subscriber_engagement": "high/medium/low"
+            }}
+          }},
+          "community_reputation": {{
+            "industry_recognition": "high/medium/low",
+            "thought_leadership": "recognized/emerging/none",
+            "community_contributions": ["forum_participation", "expert_answers", "resource_sharing"],
+            "customer_advocacy": "strong/moderate/weak"
+          }},
+          "digital_footprint_strength": {{
+            "brand_consistency": "excellent/good/poor",
+            "content_quality": "high/medium/low",
+            "engagement_frequency": "daily/weekly/monthly/sporadic",
+            "customer_interaction": "responsive/selective/poor"
+          }},
+          "competitive_social_positioning": {{
+            "vs_industry_average": "above/at/below",
+            "unique_social_advantages": ["advantage1", "advantage2"],
+            "improvement_opportunities": ["opportunity1", "opportunity2"]
+          }},
+          "social_intelligence_score": 0.0-1.0,
+          "analysis_confidence": "high/medium/low"
+        }}
+        """
+        
+        try:
+            response = await self.ask_ai(
+                prompt=analysis_prompt,
+                provider="ollama",
+                task_complexity=TaskComplexity.COMPLEX,
+                max_tokens=2000
+            )
+            
+            social_analysis = safe_json_parse(response, default={})
+            
+            # Add metadata
+            social_analysis['analysis_metadata'] = {
+                'analyzed_at': time.time(),
+                'provider_name': provider_name,
+                'website_url': website_url,
+                'analysis_method': 'ai_social_intelligence'
+            }
+            
+            self.logger.info(f"✅ Social presence analysis completed for {provider_name}")
+            return social_analysis
+            
+        except Exception as e:
+            self.logger.error(f"Social presence analysis failed for {provider_name}: {e}")
+            return {
+                'overall_social_maturity': 'unknown',
+                'analysis_error': str(e),
+                'analysis_confidence': 'low'
+            }
+    
+    async def discover_social_influencers(
+        self, 
+        target: DiscoveryTarget
+    ) -> List[Dict[str, Any]]:
+        """
+        Discover social media influencers and thought leaders in the target industry
+        
+        Args:
+            target: Discovery target specification
+            
+        Returns:
+            List of identified influencers and thought leaders
+        """
+        self.logger.info(f"🌟 Discovering social influencers for {target.service_category} in {target.country}")
+        
+        influencer_prompt = f"""
+        Identify key social media influencers and thought leaders in {target.service_category} industry in {target.country}.
+        
+        Influencer Discovery Context:
+        - Industry: {target.service_category}
+        - Geographic Focus: {target.country}
+        - Language: {target.language}
+        
+        Identify different types of industry influencers:
+        
+        1. **Executive Thought Leaders**:
+           - CEOs and founders of major {target.service_category} companies
+           - Industry veterans with significant following
+           - Executives regularly sharing industry insights
+        
+        2. **Industry Experts and Analysts**:
+           - Independent consultants and advisors
+           - Industry analysts and researchers
+           - Academic experts in the field
+        
+        3. **Content Creators and Educators**:
+           - YouTubers creating {target.service_category} content
+           - Bloggers and newsletter writers
+           - Course creators and trainers
+        
+        4. **Community Leaders**:
+           - Moderators of relevant forums and groups
+           - Organizers of industry events and meetups
+           - Active contributors to professional communities
+        
+        For each influencer, analyze their influence patterns:
+        - Primary platforms where they're active
+        - Type of content they share
+        - Engagement levels and follower counts
+        - Industry credibility and recognition
+        - Geographic focus and language
+        
+        Return JSON array with discovered influencers:
+        [{{
+          "name": "influencer_name",
+          "type": "executive/expert/creator/community_leader",
+          "primary_platform": "linkedin/twitter/youtube/other",
+          "secondary_platforms": ["platform1", "platform2"],
+          "follower_estimate": "range_or_number",
+          "content_focus": ["topic1", "topic2", "topic3"],
+          "engagement_quality": "high/medium/low",
+          "industry_credibility": "high/medium/low",
+          "geographic_relevance": "local/regional/global",
+          "influence_indicators": ["speaking_engagements", "media_mentions", "thought_leadership"],
+          "potential_collaboration": "high/medium/low"
+        }}]
+        
+        Focus on 8-12 most relevant and influential personalities.
+        """
+        
+        try:
+            response = await self.ask_ai(
+                prompt=influencer_prompt,
+                provider="ollama",
+                task_complexity=TaskComplexity.COMPLEX,
+                max_tokens=1800
+            )
+            
+            influencers_data = safe_json_parse(response, default=[])
+            
+            # Add discovery metadata
+            for influencer in influencers_data:
+                influencer['discovery_metadata'] = {
+                    'discovered_at': time.time(),
+                    'discovery_method': 'ai_social_intelligence',
+                    'target_industry': target.service_category,
+                    'target_country': target.country
+                }
+            
+            self.logger.info(f"🌟 Discovered {len(influencers_data)} social influencers")
+            return influencers_data
+            
+        except Exception as e:
+            self.logger.error(f"Influencer discovery failed: {e}")
+            return []
+    
+    async def monitor_social_sentiment(
+        self, 
+        provider_name: str,
+        target: DiscoveryTarget,
+        time_period: str = "recent"
+    ) -> Dict[str, Any]:
+        """
+        Monitor social media sentiment around a specific provider
+        
+        Args:
+            provider_name: Name of the provider to monitor
+            target: Discovery target context
+            time_period: Time period for sentiment analysis
+            
+        Returns:
+            Sentiment analysis results
+        """
+        self.logger.info(f"📊 Monitoring social sentiment for {provider_name}")
+        
+        sentiment_prompt = f"""
+        Analyze social media sentiment and discussions around {provider_name} in the {target.service_category} industry.
+        
+        Sentiment Analysis Context:
+        - Provider: {provider_name}
+        - Industry: {target.service_category}
+        - Geographic Focus: {target.country}
+        - Time Period: {time_period}
+        
+        Analyze sentiment across different dimensions:
+        
+        1. **Overall Brand Sentiment**:
+           - General public perception
+           - Customer satisfaction indicators
+           - Brand reputation trends
+        
+        2. **Service Quality Perception**:
+           - Customer experience feedback
+           - Service reliability mentions
+           - Support quality discussions
+        
+        3. **Competitive Positioning**:
+           - Comparisons with competitors
+           - Unique value proposition recognition
+           - Market position perception
+        
+        4. **Platform-Specific Sentiment**:
+           - LinkedIn professional discussions
+           - Twitter customer service interactions
+           - Reddit community conversations
+           - Facebook customer reviews
+        
+        5. **Key Discussion Themes**:
+           - Most mentioned topics
+           - Common praise points
+           - Frequent complaints
+           - Feature requests and suggestions
+        
+        Return JSON with sentiment analysis:
+        {{
+          "overall_sentiment": {{
+            "score": -1.0 to 1.0,
+            "classification": "very_positive/positive/neutral/negative/very_negative",
+            "confidence": 0.0-1.0
+          }},
+          "sentiment_breakdown": {{
+            "service_quality": {{
+              "score": -1.0 to 1.0,
+              "key_themes": ["theme1", "theme2"],
+              "sample_mentions": ["mention1", "mention2"]
+            }},
+            "customer_support": {{
+              "score": -1.0 to 1.0,
+              "key_themes": ["theme1", "theme2"],
+              "sample_mentions": ["mention1", "mention2"]
+            }},
+            "pricing_value": {{
+              "score": -1.0 to 1.0,
+              "key_themes": ["theme1", "theme2"],
+              "sample_mentions": ["mention1", "mention2"]
+            }}
+          }},
+          "platform_sentiment": {{
+            "linkedin": {{
+              "sentiment": "positive/neutral/negative",
+              "discussion_type": "professional/promotional/mixed"
+            }},
+            "twitter": {{
+              "sentiment": "positive/neutral/negative", 
+              "discussion_type": "customer_service/complaints/praise"
+            }},
+            "reddit": {{
+              "sentiment": "positive/neutral/negative",
+              "discussion_type": "recommendations/reviews/discussions"
+            }}
+          }},
+          "trending_topics": [{{
+            "topic": "topic_name",
+            "sentiment": "positive/neutral/negative",
+            "frequency": "high/medium/low",
+            "trend_direction": "rising/stable/declining"
+          }}],
+          "competitive_mentions": [{{
+            "competitor": "competitor_name",
+            "comparison_context": "context_description",
+            "sentiment_towards_provider": "positive/neutral/negative"
+          }}],
+          "analysis_summary": {{
+            "key_strengths": ["strength1", "strength2"],
+            "key_weaknesses": ["weakness1", "weakness2"],
+            "reputation_risk_level": "low/medium/high",
+            "improvement_opportunities": ["opportunity1", "opportunity2"]
+          }}
+        }}
+        """
+        
+        try:
+            response = await self.ask_ai(
+                prompt=sentiment_prompt,
+                provider="ollama",
+                task_complexity=TaskComplexity.COMPLEX,
+                max_tokens=2200
+            )
+            
+            sentiment_data = safe_json_parse(response, default={})
+            
+            # Add analysis metadata
+            sentiment_data['analysis_metadata'] = {
+                'analyzed_at': time.time(),
+                'provider_name': provider_name,
+                'analysis_period': time_period,
+                'analysis_method': 'ai_sentiment_analysis'
+            }
+            
+            self.logger.info(f"📊 Sentiment analysis completed for {provider_name}")
+            return sentiment_data
+            
+        except Exception as e:
+            self.logger.error(f"Sentiment analysis failed for {provider_name}: {e}")
+            return {
+                'overall_sentiment': {'classification': 'unknown', 'confidence': 0.0},
+                'analysis_error': str(e)
+            }
