@@ -1,762 +1,425 @@
 # main.py
 """
-Service Aggregator - Production Ready System
-A simple yet powerful service comparison platform
+Main application entry point for Norwegian Service Aggregator
+Production-ready Streamlit application with comprehensive error handling and monitoring
 """
-import asyncio
-import sqlite3
-import json
-import time
-import random
-import hashlib
-import requests
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass, asdict
+
+import sys
+import os
+import logging
+import signal
+import atexit
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
 import streamlit as st
 import pandas as pd
+import json
+from datetime import datetime
+from service_extractor import ServiceExtractor, run_extraction_in_streamlit
 
-@dataclass
-class ServicePlan:
-    """Service plan data structure"""
-    id: str
-    provider: str
-    name: str
-    category: str
-    monthly_price: float
-    features: str  # JSON string for database storage
-    url: str
-    extracted_at: str
-    confidence: float = 1.0
 
-class ServiceExtractor:
+# Configure comprehensive logging before any other imports
+def setup_logging() -> logging.Logger:
+    """Setup comprehensive logging configuration for production environment"""
+    # Create logs directory if it doesn't exist
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+
+    # Configure logging format for production
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+    formatter = logging.Formatter(log_format)
+
+    # Create handlers
+    app_file_handler = logging.FileHandler(log_dir / 'app.log', encoding='utf-8')
+    app_file_handler.setLevel(logging.INFO)
+    app_file_handler.setFormatter(formatter)
+
+    error_file_handler = logging.FileHandler(log_dir / 'error.log', encoding='utf-8')
+    error_file_handler.setLevel(logging.ERROR)
+    error_file_handler.setFormatter(formatter)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+
+    # Configure root logger
+    logger = logging.getLogger("app")
+    logger.setLevel(logging.DEBUG)  # Or INFO depending on your verbosity needs
+    logger.addHandler(app_file_handler)
+    logger.addHandler(error_file_handler)
+    logger.addHandler(console_handler)
+
+    # Silence noisy loggers
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('requests').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
+    logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    logging.getLogger('PIL').setLevel(logging.WARNING)
+
+    return logger
+
+
+# Initialize logger
+logger = setup_logging()
+
+
+def setup_environment() -> bool:
     """
-    Core extraction engine for Norwegian service providers
-    Focus: Reliability, simplicity, and cost efficiency
+    Setup application environment and validate prerequisites
+    
+    Returns:
+        bool: True if environment setup successful, False otherwise
     """
+    try:
+        # Add project root to Python path for module imports
+        project_root = Path(__file__).parent.absolute()
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        
+        # Create required directories
+        required_dirs = ['data', 'logs', 'config', 'temp']
+        for dir_name in required_dirs:
+            dir_path = project_root / dir_name
+            dir_path.mkdir(exist_ok=True)
+            logger.debug(f"Ensured directory exists: {dir_path}")
+        
+        # Set environment variables for Streamlit optimization
+        os.environ.setdefault('STREAMLIT_SERVER_HEADLESS', 'true')
+        os.environ.setdefault('STREAMLIT_BROWSER_GATHER_USAGE_STATS', 'false')
+        os.environ.setdefault('STREAMLIT_SERVER_ENABLE_CORS', 'false')
+        os.environ.setdefault('STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION', 'true')
+        
+        # Configure asyncio for Windows compatibility
+        import platform
+        if platform.system() == 'Windows':
+            import asyncio
+            if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                logger.info("Set Windows-compatible asyncio event loop policy")
+        
+        logger.info("Environment setup completed successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to setup environment: {e}", exc_info=True)
+        return False
+
+
+def validate_dependencies() -> bool:
+    """
+    Validate that all required dependencies are available
     
-    def __init__(self):
-        self.db_path = "services.db"
-        self.patterns = self._load_extraction_patterns()
-        self.session_count = 0
-        self._initialize_database()
-        print("✅ Service Extractor initialized")
+    Returns:
+        bool: True if all dependencies are available, False otherwise
+    """
+    required_packages = [
+        ('streamlit', 'Streamlit web framework'),
+        ('pandas', 'Data manipulation library'),
+        ('plotly', 'Interactive visualization library'),
+        ('requests', 'HTTP client library'),
+        ('bs4', 'HTML parsing library'),
+        ('playwright', 'Browser automation library')
+    ]
     
-    def _load_extraction_patterns(self) -> Dict[str, Any]:
-        """Load proven extraction patterns for Norwegian providers"""
-        return {
-            # Mobile operators - tested patterns
-            "telia.no": {
-                "category": "mobile",
-                "price_regex": r'(\d+)\s*kr',
-                "name_selectors": ['h3', '.plan-name', '.subscription-title', '[data-testid*="plan"]'],
-                "container_selectors": ['.plan-card', '.subscription-box', '.product-card'],
-                "features_selectors": ['li', '.feature', '.benefit', '.included']
-            },
-            "telenor.no": {
-                "category": "mobile", 
-                "price_regex": r'(\d+)\s*kr',
-                "name_selectors": ['h3', '.plan-title', '[data-cy*="plan"]'],
-                "container_selectors": ['.product-card', '.plan-container', '.mobile-plan'],
-                "features_selectors": ['li', '.feature-list li', '.benefits li']
-            },
-            "ice.no": {
-                "category": "mobile",
-                "price_regex": r'(\d+)\s*kr', 
-                "name_selectors": ['h3', '.plan-name', '.title'],
-                "container_selectors": ['.plan-box', '.offer-card'],
-                "features_selectors": ['li', '.features li']
-            },
-            # Electricity providers
-            "fortum.no": {
-                "category": "electricity",
-                "price_regex": r'(\d+[,\.]\d+)\s*øre',
-                "name_selectors": ['h3', '.plan-title', '.product-name'],
-                "container_selectors": ['.price-plan', '.electricity-plan'],
-                "features_selectors": ['li', '.feature']
-            },
-            "hafslund.no": {
-                "category": "electricity",
-                "price_regex": r'(\d+[,\.]\d+)\s*øre',
-                "name_selectors": ['h3', '.plan-name'],
-                "container_selectors": ['.plan-card', '.price-card'],
-                "features_selectors": ['li', '.benefits li']
-            }
-        }
+    missing_packages = []
     
-    def _initialize_database(self):
-        """Create SQLite database with optimized schema"""
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS plans (
-            id TEXT PRIMARY KEY,
-            provider TEXT NOT NULL,
-            name TEXT NOT NULL,
-            category TEXT NOT NULL,
-            monthly_price REAL,
-            features TEXT,
-            url TEXT,
-            extracted_at TEXT,
-            confidence REAL DEFAULT 1.0,
-            
-            -- Indexes for performance
-            UNIQUE(id)
-        )
-        """)
-        
-        # Create performance indexes
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_provider ON plans(provider)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_category ON plans(category)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_price ON plans(monthly_price)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_extracted ON plans(extracted_at)")
-        
-        conn.commit()
-        conn.close()
-        print("✅ Database initialized")
+    for package_name, description in required_packages:
+        try:
+            __import__(package_name)
+            logger.debug(f"✅ {package_name}: Available")
+        except ImportError:
+            missing_packages.append((package_name, description))
+            logger.error(f"❌ {package_name}: Missing - {description}")
     
-    async def _apply_stealth_measures(self, page):
-        """Apply anti-detection measures"""
-        # Remove webdriver detection
-        await page.add_init_script("""
-        // Remove webdriver property
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        
-        // Mock plugins
-        Object.defineProperty(navigator, 'plugins', {
-            get: () => [1, 2, 3].map(() => ({name: 'Chrome PDF Plugin'}))
-        });
-        
-        // Mock languages
-        Object.defineProperty(navigator, 'languages', {
-            get: () => ['en-US', 'en', 'no']
-        });
-        """)
-        
-        # Block tracking and analytics
-        await page.route("**/*", lambda route: (
-            route.abort() if any(domain in route.request.url for domain in [
-                'google-analytics.com', 'googletagmanager.com', 'facebook.com/tr',
-                'hotjar.com', 'fullstory.com', 'recaptcha.net'
-            ]) else route.continue_()
-        ))
-    
-    async def _simulate_human_behavior(self, page):
-        """Simulate realistic human browsing behavior"""
-        # Random initial delay
-        await asyncio.sleep(random.uniform(1.0, 3.0))
-        
-        # Random mouse movements
-        for _ in range(random.randint(3, 6)):
-            x = random.randint(100, 1800)
-            y = random.randint(100, 900)
-            await page.mouse.move(x, y)
-            await asyncio.sleep(random.uniform(0.1, 0.5))
-        
-        # Natural scrolling behavior
-        for _ in range(random.randint(2, 4)):
-            scroll_distance = random.randint(100, 500)
-            await page.mouse.wheel(0, scroll_distance)
-            await asyncio.sleep(random.uniform(0.8, 2.0))
-        
-        # Occasional random clicks (non-functional)
-        if random.random() < 0.3:
-            try:
-                elements = await page.query_selector_all('div, span')
-                if elements:
-                    element = random.choice(elements[:5])
-                    await element.click()
-                    await asyncio.sleep(random.uniform(0.5, 1.5))
-            except:
-                pass  # Ignore click failures
-    
-    async def _handle_cookie_consent(self, page) -> bool:
-        """Handle cookie consent dialogs"""
-        # Common Norwegian cookie consent patterns
-        cookie_patterns = [
-            'button:has-text("Godta alle")',
-            'button:has-text("Godta")',
-            'button:has-text("Accept all")', 
-            'button:has-text("Accept")',
-            'button:has-text("OK")',
-            '.cookie-accept',
-            '.accept-all-cookies',
-            '[data-testid*="accept"]',
-            '[data-cy*="accept"]'
-        ]
-        
-        for pattern in cookie_patterns:
-            try:
-                await page.click(pattern, timeout=2000)
-                await asyncio.sleep(1)
-                print("✅ Cookie consent handled")
-                return True
-            except:
-                continue
-        
-        print("ℹ️ No cookie consent dialog found")
+    if missing_packages:
+        logger.error("Missing required dependencies:")
+        for package_name, description in missing_packages:
+            logger.error(f"  - {package_name}: {description}")
+        logger.error("Install missing packages with: pip install -r requirements.txt")
         return False
     
-    def _extract_plans_from_html(self, html: str, domain: str) -> List[ServicePlan]:
-        """Extract service plans using domain-specific patterns"""
-        
-        if domain not in self.patterns:
-            print(f"⚠️ No extraction pattern for {domain}")
-            return []
-        
-        pattern_config = self.patterns[domain]
-        plans = []
-        
-        try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(html, 'html.parser')
-            
-            # Find plan containers
-            containers = []
-            for selector in pattern_config['container_selectors']:
-                found_containers = soup.select(selector)
-                containers.extend(found_containers)
-            
-            print(f"🔍 Found {len(containers)} potential plan containers")
-            
-            for container in containers:
-                # Extract plan name
-                name = "Unknown Plan"
-                for name_selector in pattern_config['name_selectors']:
-                    name_elem = container.select_one(name_selector)
-                    if name_elem and name_elem.get_text().strip():
-                        name = name_elem.get_text().strip()
-                        break
-                
-                # Extract price using regex
-                price = 0.0
-                container_text = container.get_text()
-                import re
-                price_match = re.search(pattern_config['price_regex'], container_text)
-                if price_match:
-                    try:
-                        price_str = price_match.group(1).replace(',', '.')
-                        price = float(price_str)
-                    except (ValueError, IndexError):
-                        price = 0.0
-                
-                # Extract features
-                features = []
-                for feature_selector in pattern_config['features_selectors']:
-                    feature_elements = container.select(feature_selector)
-                    for elem in feature_elements:
-                        feature_text = elem.get_text().strip()
-                        if feature_text and len(feature_text) < 200:  # Reasonable feature length
-                            features.append(feature_text)
-                
-                # Create plan if we have meaningful data
-                if name != "Unknown Plan" and (price > 0 or features):
-                    plan = ServicePlan(
-                        id=f"{domain.replace('.', '_')}_{hashlib.md5(name.encode()).hexdigest()[:8]}",
-                        provider=domain.split('.')[0].title(),
-                        name=name,
-                        category=pattern_config['category'],
-                        monthly_price=price,
-                        features=json.dumps(features, ensure_ascii=False),
-                        url=f"https://{domain}",
-                        extracted_at=datetime.now().isoformat(),
-                        confidence=0.9  # High confidence for pattern-based extraction
-                    )
-                    plans.append(plan)
-                    print(f"✅ Extracted: {name} - {price} kr")
-            
-        except Exception as e:
-            print(f"❌ Pattern extraction failed for {domain}: {e}")
-        
-        return plans
-    
-    async def extract_from_provider(self, url: str) -> List[ServicePlan]:
-        """Main extraction method for a single provider"""
-        
-        domain = url.replace('https://', '').replace('http://', '').split('/')[0]
-        print(f"\n🎯 Starting extraction from: {domain}")
-        
-        try:
-            from playwright.async_api import async_playwright
-            
-            async with async_playwright() as p:
-                # Launch browser with stealth configuration
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--no-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-blink-features=AutomationControlled',
-                        '--disable-extensions'
-                    ]
-                )
-                
-                # Create stealth context
-                context = await browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    extra_http_headers={
-                        'Accept-Language': 'en-US,en;q=0.9,no;q=0.8',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-                    }
-                )
-                
-                page = await context.new_page()
-                
-                try:
-                    # Apply stealth measures
-                    await self._apply_stealth_measures(page)
-                    
-                    # Navigate to provider
-                    print(f"🌐 Navigating to {url}")
-                    await page.goto(url, wait_until='networkidle', timeout=30000)
-                    
-                    # Handle cookie consent
-                    await self._handle_cookie_consent(page)
-                    
-                    # Simulate human behavior
-                    await self._simulate_human_behavior(page)
-                    
-                    # Get page content
-                    html_content = await page.content()
-                    
-                    # Extract plans using patterns
-                    plans = self._extract_plans_from_html(html_content, domain)
-                    
-                    # Store successful extractions
-                    if plans:
-                        self._store_plans_in_database(plans)
-                        print(f"✅ Successfully extracted {len(plans)} plans from {domain}")
-                    else:
-                        print(f"⚠️ No plans extracted from {domain}")
-                    
-                    self.session_count += 1
-                    return plans
-                    
-                except Exception as e:
-                    print(f"❌ Extraction failed for {domain}: {str(e)}")
-                    return []
-                
-                finally:
-                    await browser.close()
-        
-        except Exception as e:
-            print(f"❌ Browser setup failed: {str(e)}")
-            return []
-    
-    def _store_plans_in_database(self, plans: List[ServicePlan]):
-        """Store extracted plans in SQLite database"""
-        
-        conn = sqlite3.connect(self.db_path)
-        
-        for plan in plans:
-            conn.execute("""
-            INSERT OR REPLACE INTO plans 
-            (id, provider, name, category, monthly_price, features, url, extracted_at, confidence)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                plan.id, plan.provider, plan.name, plan.category,
-                plan.monthly_price, plan.features, plan.url,
-                plan.extracted_at, plan.confidence
-            ))
-        
-        conn.commit()
-        conn.close()
-        print(f"💾 Stored {len(plans)} plans in database")
-    
-    def search_plans(self, category: str = None, max_price: float = None, 
-                    provider: str = None, limit: int = 50) -> List[Dict]:
-        """Search plans in database with filters"""
-        
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row  # Enable column access by name
-        
-        query = "SELECT * FROM plans WHERE 1=1"
-        params = []
-        
-        if category:
-            query += " AND category = ?"
-            params.append(category)
-        
-        if max_price:
-            query += " AND monthly_price <= ?"
-            params.append(max_price)
-        
-        if provider:
-            query += " AND provider LIKE ?"
-            params.append(f"%{provider}%")
-        
-        query += " ORDER BY monthly_price ASC LIMIT ?"
-        params.append(limit)
-        
-        results = conn.execute(query, params).fetchall()
-        conn.close()
-        
-        return [dict(row) for row in results]
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get extraction and database statistics"""
-        
-        conn = sqlite3.connect(self.db_path)
-        
-        # Total plans
-        total_plans = conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
-        
-        # Plans by category
-        category_stats = conn.execute("""
-        SELECT category, COUNT(*) as count, ROUND(AVG(monthly_price), 2) as avg_price
-        FROM plans 
-        WHERE monthly_price > 0
-        GROUP BY category
-        """).fetchall()
-        
-        # Plans by provider
-        provider_stats = conn.execute("""
-        SELECT provider, COUNT(*) as count
-        FROM plans 
-        GROUP BY provider
-        ORDER BY count DESC
-        """).fetchall()
-        
-        # Recent extractions
-        recent_extractions = conn.execute("""
-        SELECT COUNT(*) as count
-        FROM plans 
-        WHERE extracted_at > datetime('now', '-24 hours')
-        """).fetchone()[0]
-        
-        conn.close()
-        
-        return {
-            "total_plans": total_plans,
-            "categories": {row[0]: {"count": row[1], "avg_price": row[2]} for row in category_stats},
-            "providers": {row[0]: row[1] for row in provider_stats},
-            "recent_extractions": recent_extractions,
-            "extraction_sessions": self.session_count
-        }
+    logger.info("All required dependencies are available")
+    return True
 
-def create_admin_interface():
-    """Create Streamlit-based admin interface"""
-    
-    # Page configuration
-    st.set_page_config(
-        page_title="Service Aggregator Admin",
-        page_icon="🔍",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    
-    # Custom CSS for better appearance
-    st.markdown("""
-    <style>
-    .main-header {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        border-left: 4px solid #667eea;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    # Main header
-    st.markdown("""
-    <div class="main-header">
-        <h1>🔍 Service Aggregator - Admin Dashboard</h1>
-        <p>Norwegian Service Provider Comparison Platform</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Initialize extractor
-    if 'extractor' not in st.session_state:
-        with st.spinner("Initializing Service Extractor..."):
-            st.session_state.extractor = ServiceExtractor()
-    
-    extractor = st.session_state.extractor
-    
-    # Sidebar controls
-    st.sidebar.header("🎛️ Control Panel")
-    
-    # Manual extraction section
-    st.sidebar.subheader("Manual Extraction")
-    
-    # Predefined providers
-    provider_options = {
-        "Telia Mobile": "https://www.telia.no/mobilabonnement",
-        "Telenor Mobile": "https://www.telenor.no/mobilabonnement/",
-        "Ice Mobile": "https://www.ice.no/mobilabonnement/",
-		"Talkmore": "https://talkmore.no/privat/abonnement/enkelt/bestill",
-        "Fortum Electricity": "https://www.fortum.com/no/strom/stromavtale",
-        "Forbrukerradet": "https://www.forbrukerradet.no/strompris/"
-    }
-    
-    selected_provider = st.sidebar.selectbox(
-        "Select Provider",
-        list(provider_options.keys())
-    )
-    
-    if st.sidebar.button("🚀 Extract Selected Provider"):
-        with st.spinner(f"Extracting from {selected_provider}..."):
-            url = provider_options[selected_provider]
-            
-            # Show progress
-            progress_bar = st.sidebar.progress(0)
-            status_text = st.sidebar.empty()
-            
-            try:
-                status_text.text("Starting extraction...")
-                progress_bar.progress(25)
-                
-                plans = asyncio.run(extractor.extract_from_provider(url))
-                progress_bar.progress(100)
-                
-                if plans:
-                    st.sidebar.success(f"✅ Extracted {len(plans)} plans!")
-                    status_text.text(f"Successfully extracted {len(plans)} plans")
-                else:
-                    st.sidebar.warning("⚠️ No plans found")
-                    status_text.text("No plans extracted")
-                
-            except Exception as e:
-                st.sidebar.error(f"❌ Extraction failed: {str(e)}")
-                status_text.text("Extraction failed")
-            
-            progress_bar.empty()
-    
-    # Custom URL extraction
-    st.sidebar.subheader("Custom URL")
-    custom_url = st.sidebar.text_input("Enter URL")
-    
-    if st.sidebar.button("🔍 Extract Custom URL"):
-        if custom_url:
-            with st.spinner("Extracting from custom URL..."):
-                try:
-                    plans = asyncio.run(extractor.extract_from_provider(custom_url))
-                    if plans:
-                        st.sidebar.success(f"✅ Extracted {len(plans)} plans!")
-                    else:
-                        st.sidebar.warning("⚠️ No plans found")
-                except Exception as e:
-                    st.sidebar.error(f"❌ Error: {str(e)}")
-        else:
-            st.sidebar.error("Please enter a URL")
-    
-    # Bulk extraction
-    st.sidebar.subheader("Bulk Operations")
-    
-    if st.sidebar.button("🔄 Extract All Known Providers"):
-        all_urls = list(provider_options.values())
-        total_plans = 0
-        
-        progress_bar = st.sidebar.progress(0)
-        status_text = st.sidebar.empty()
-        
-        for i, (name, url) in enumerate(provider_options.items()):
-            status_text.text(f"Extracting from {name}...")
-            
-            try:
-                plans = asyncio.run(extractor.extract_from_provider(url))
-                total_plans += len(plans)
-                progress_bar.progress((i + 1) / len(provider_options))
-                
-            except Exception as e:
-                st.sidebar.error(f"Failed to extract from {name}: {str(e)}")
-        
-        status_text.text(f"Completed! Total: {total_plans} plans")
-        st.sidebar.success(f"🎉 Bulk extraction complete! Total: {total_plans} plans")
-    
-    # Main dashboard area
-    col1, col2, col3, col4 = st.columns(4)
-    
-    # Get current statistics
-    stats = extractor.get_statistics()
-    
-    # Display key metrics
-    with col1:
-        st.metric(
-            label="📊 Total Plans",
-            value=stats['total_plans'],
-            delta=f"+{stats['recent_extractions']} today"
+
+def setup_error_handlers() -> None:
+    """Setup global error handlers for graceful application shutdown"""
+
+    def signal_handler(signum: int, frame) -> None:
+        """Handle system signals for graceful shutdown"""
+        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        cleanup_application()
+        sys.exit(0)
+
+    def exception_handler(exc_type, exc_value, exc_traceback) -> None:
+        """Handle uncaught exceptions"""
+        if issubclass(exc_type, KeyboardInterrupt):
+            logger.info("Application interrupted by user")
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger.critical(
+            "Uncaught exception occurred", exc_info=(exc_type, exc_value, exc_traceback)
         )
-    
-    with col2:
-        st.metric(
-            label="🏢 Providers",
-            value=len(stats['providers']),
-            delta=None
-        )
-    
-    with col3:
-        st.metric(
-            label="📂 Categories",
-            value=len(stats['categories']),
-            delta=None
-        )
-    
-    with col4:
-        st.metric(
-            label="🔄 Sessions",
-            value=stats['extraction_sessions'],
-            delta=None
-        )
-    
-    # Search and filter interface
-    st.subheader("🔍 Search Service Plans")
-    
-    search_col1, search_col2, search_col3, search_col4 = st.columns(4)
-    
-    with search_col1:
-        category_options = ["All"] + list(stats['categories'].keys())
-        selected_category = st.selectbox("Category", category_options)
-    
-    with search_col2:
-        max_price = st.number_input("Max Price (kr)", min_value=0, max_value=5000, value=1000)
-    
-    with search_col3:
-        provider_filter = st.text_input("Provider")
-    
-    with search_col4:
-        results_limit = st.number_input("Results Limit", min_value=10, max_value=100, value=50)
-    
-    # Execute search
-    search_params = {}
-    if selected_category != "All":
-        search_params['category'] = selected_category
-    if max_price > 0:
-        search_params['max_price'] = max_price
-    if provider_filter:
-        search_params['provider'] = provider_filter
-    
-    search_params['limit'] = results_limit
-    
-    # Get search results
-    results = extractor.search_plans(**search_params)
-    
-    # Display results
-    if results:
-        st.subheader(f"📋 Found {len(results)} Plans")
-        
-        # Convert to DataFrame for better display
-        df = pd.DataFrame(results)
-        
-        # Process features column for display
-        if 'features' in df.columns:
-            def format_features(features_json):
-                try:
-                    features = json.loads(features_json) if features_json else []
-                    return ', '.join(features[:3]) + ('...' if len(features) > 3 else '')
-                except:
-                    return 'N/A'
-            
-            df['features_display'] = df['features'].apply(format_features)
-            df = df.drop('features', axis=1)
-        
-        # Format extracted_at for readability
-        if 'extracted_at' in df.columns:
-            df['extracted_at'] = pd.to_datetime(df['extracted_at']).dt.strftime('%Y-%m-%d %H:%M')
-        
-        # Display with formatting
-        st.dataframe(
-            df,
-            use_container_width=True,
-            column_config={
-                "monthly_price": st.column_config.NumberColumn(
-                    "Price (kr)",
-                    format="%.0f kr"
-                ),
-                "confidence": st.column_config.ProgressColumn(
-                    "Confidence",
-                    min_value=0,
-                    max_value=1
-                )
-            }
-        )
-        
-        # Export options
-        st.subheader("📤 Export Options")
-        
-        export_col1, export_col2 = st.columns(2)
-        
-        with export_col1:
-            # CSV export
-            csv_data = df.to_csv(index=False)
-            st.download_button(
-                label="📄 Download as CSV",
-                data=csv_data,
-                file_name=f"service_plans_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-        
-        with export_col2:
-            # JSON export
-            json_data = df.to_json(orient='records', indent=2)
-            st.download_button(
-                label="📋 Download as JSON",
-                data=json_data,
-                file_name=f"service_plans_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json"
-            )
-    
+
+    import threading
+
+    if threading.current_thread() is threading.main_thread():
+        # Register signal handlers safely
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
     else:
-        st.info("🔍 No plans found with current filters. Try adjusting your search criteria.")
-    
-    # Statistics and analytics
-    if stats['total_plans'] > 0:
-        st.subheader("📈 Analytics Dashboard")
-        
-        analytics_col1, analytics_col2 = st.columns(2)
-        
-        with analytics_col1:
-            # Category distribution
-            if stats['categories']:
-                st.write("**Plans by Category**")
-                category_df = pd.DataFrame([
-                    {"Category": cat, "Count": data['count'], "Avg Price": data['avg_price']}
-                    for cat, data in stats['categories'].items()
-                ])
-                st.bar_chart(category_df.set_index('Category')['Count'])
-        
-        with analytics_col2:
-            # Provider distribution
-            if stats['providers']:
-                st.write("**Plans by Provider**")
-                provider_df = pd.DataFrame([
-                    {"Provider": provider, "Count": count}
-                    for provider, count in list(stats['providers'].items())[:10]
-                ])
-                st.bar_chart(provider_df.set_index('Provider'))
-    
-    # System status
-    st.subheader("🔧 System Status")
-    
-    status_col1, status_col2, status_col3 = st.columns(3)
-    
-    with status_col1:
-        st.write("**Database Status**")
-        if stats['total_plans'] > 0:
-            st.success("✅ Active")
-        else:
-            st.warning("⚠️ Empty")
-    
-    with status_col2:
-        st.write("**Last Activity**")
-        if stats['recent_extractions'] > 0:
-            st.success(f"✅ {stats['recent_extractions']} extractions today")
-        else:
-            st.info("ℹ️ No recent activity")
-    
-    with status_col3:
-        st.write("**Extraction Patterns**")
-        pattern_count = len(extractor.patterns)
-        st.info(f"📝 {pattern_count} providers configured")
+        logger.warning("Signal handlers not registered: not in main thread")
 
-# Main application entry point
+    # Register exception handler and exit cleanup
+    sys.excepthook = exception_handler
+    atexit.register(cleanup_application)
+
+    logger.info("Error handlers registered successfully")
+
+
+def cleanup_application() -> None:
+    """Cleanup application resources on shutdown"""
+    try:
+        logger.info("Starting application cleanup...")
+        
+        # Cleanup extraction engine if it exists
+        try:
+            from core.extractor_engine import shutdown_extraction_engine
+            shutdown_extraction_engine()
+            logger.info("Extraction engine shutdown completed")
+        except ImportError:
+            logger.debug("Extraction engine not available for cleanup")
+        except Exception as e:
+            logger.error(f"Error during extraction engine cleanup: {e}")
+        
+        # Clear Streamlit cache
+        try:
+            if hasattr(st, 'cache_data'):
+                st.cache_data.clear()
+            if hasattr(st, 'cache_resource'):
+                st.cache_resource.clear()
+            logger.info("Streamlit cache cleared")
+        except Exception as e:
+            logger.error(f"Error clearing Streamlit cache: {e}")
+        
+        # Close any open file handles
+        try:
+            import gc
+            gc.collect()
+            logger.info("Garbage collection completed")
+        except Exception as e:
+            logger.error(f"Error during garbage collection: {e}")
+        
+        logger.info("Application cleanup completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Error during application cleanup: {e}", exc_info=True)
+
+
+def check_system_resources() -> bool:
+    """
+    Check system resources and warn if insufficient
+    
+    Returns:
+        bool: True if resources are adequate, False if critical shortage
+    """
+    try:
+        import psutil
+        
+        # Check available memory
+        memory = psutil.virtual_memory()
+        available_mb = memory.available / (1024 * 1024)
+        
+        if available_mb < 512:  # Less than 512 MB available
+            logger.error(f"Insufficient memory: {available_mb:.0f} MB available (minimum 512 MB required)")
+            return False
+        elif available_mb < 1024:  # Less than 1 GB available
+            logger.warning(f"Low memory: {available_mb:.0f} MB available (recommended: 1+ GB)")
+        else:
+            logger.info(f"Memory check passed: {available_mb:.0f} MB available")
+        
+        # Check disk space
+        disk = psutil.disk_usage('.')
+        free_mb = disk.free / (1024 * 1024)
+        
+        if free_mb < 100:  # Less than 100 MB free
+            logger.error(f"Insufficient disk space: {free_mb:.0f} MB free (minimum 100 MB required)")
+            return False
+        elif free_mb < 500:  # Less than 500 MB free
+            logger.warning(f"Low disk space: {free_mb:.0f} MB free (recommended: 500+ MB)")
+        else:
+            logger.info(f"Disk space check passed: {free_mb:.0f} MB free")
+        
+        # Check CPU usage
+        cpu_percent = psutil.cpu_percent(interval=1)
+        if cpu_percent > 90:
+            logger.warning(f"High CPU usage: {cpu_percent:.1f}% (may impact performance)")
+        else:
+            logger.info(f"CPU usage check passed: {cpu_percent:.1f}%")
+        
+        return True
+        
+    except ImportError:
+        logger.warning("psutil not available, skipping system resource checks")
+        return True
+    except Exception as e:
+        logger.error(f"Error checking system resources: {e}")
+        return True  # Don't fail startup for resource check errors
+
+
+def initialize_application() -> bool:
+    """
+    Initialize the main application with comprehensive error handling
+    
+    Returns:
+        bool: True if initialization successful, False otherwise
+    """
+    try:
+        logger.info("=== Norwegian Service Aggregator v5 Starting ===")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"Working directory: {os.getcwd()}")
+        
+        # Setup environment and validate prerequisites
+        if not setup_environment():
+            logger.error("Environment setup failed")
+            return False
+        
+        # Validate dependencies
+        if not validate_dependencies():
+            logger.error("Dependency validation failed")
+            return False
+        
+        # Check system resources
+        if not check_system_resources():
+            logger.error("System resource check failed")
+            return False
+        
+        # Setup error handlers
+        setup_error_handlers()
+        
+        logger.info("Application initialization completed successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Application initialization failed: {e}", exc_info=True)
+        return False
+
+
+def run_application() -> None:
+    """Run the main Streamlit application with error handling"""
+    try:
+        # Import and run the Streamlit application
+        from ui.streamlit_app import main as streamlit_main
+        
+        logger.info("Starting Streamlit application...")
+        
+        # Run the main application
+        streamlit_main()
+        
+    except ImportError as e:
+        error_msg = f"Failed to import required modules: {e}"
+        logger.error(error_msg)
+        
+        # Show error in Streamlit if possible
+        try:
+            st.error("❌ Application Import Error")
+            st.error(error_msg)
+            st.info("""
+            **Troubleshooting Steps:**
+            1. Ensure all dependencies are installed: `pip install -r requirements.txt`
+            2. Check that you're in the correct directory
+            3. Verify Python path configuration
+            4. Check the application logs for detailed error information
+            """)
+        except:
+            print(f"❌ Import Error: {error_msg}")
+            print("Please ensure all dependencies are installed: pip install -r requirements.txt")
+        
+        sys.exit(1)
+        
+    except Exception as e:
+        error_msg = f"Application runtime error: {e}"
+        logger.error(error_msg, exc_info=True)
+        
+        # Show error in Streamlit if possible
+        try:
+            st.error("❌ Application Runtime Error")
+            st.error(error_msg)
+            st.info("""
+            **Error Recovery Steps:**
+            1. Refresh the page to restart the application
+            2. Check system resources (memory, disk space)
+            3. Review the application logs for detailed information
+            4. Contact support if the issue persists
+            """)
+            
+            # Show system information for debugging
+            with st.expander("🔧 System Information (for debugging)"):
+                st.code(f"""
+                Python Version: {sys.version}
+                Working Directory: {os.getcwd()}
+                Python Path: {sys.path[:3]}...
+                Environment Variables: {len(os.environ)} variables set
+                """)
+                
+        except:
+            print(f"❌ Application Error: {error_msg}")
+            print("Check the logs for detailed error information")
+        
+        sys.exit(1)
+
+
+def display_startup_banner() -> None:
+    """Display startup banner with system information"""
+    banner = """
+    ╔══════════════════════════════════════════════════════════════╗
+    ║                                                              ║
+    ║        🇳🇴 Norwegian Service Aggregator v5.0.0                ║
+    ║                                                              ║
+    ║        Real-time Service Plan Extraction & Comparison        ║
+    ║                                                              ║
+    ║        ⚡ Production-Ready  📊 Analytics  🔒 Secure           ║
+    ║                                                              ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """
+    
+    print(banner)
+    logger.info("Norwegian Service Aggregator v5.0.0 - Production Ready")
+
+
+def main() -> None:
+    """
+    Main application entry point with comprehensive error handling and monitoring
+    Coordinates application initialization, configuration, and execution
+    """
+    try:
+        # Display startup banner
+        display_startup_banner()
+        
+        # Initialize application
+        if not initialize_application():
+            logger.error("Application initialization failed, exiting...")
+            sys.exit(1)
+        
+        # Run the main application
+        run_application()
+        
+    except KeyboardInterrupt:
+        logger.info("Application interrupted by user")
+        print("\n👋 Application stopped by user")
+        sys.exit(0)
+        
+    except SystemExit as e:
+        logger.info(f"Application exiting with code: {e.code}")
+        sys.exit(e.code)
+        
+    except Exception as e:
+        logger.critical(f"Critical application error: {e}", exc_info=True)
+        print(f"❌ Critical Error: {e}")
+        print("Check logs/app.log for detailed error information")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    create_admin_interface()
+    # Entry point for direct script execution
+    main()

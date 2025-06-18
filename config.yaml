@@ -27,6 +27,7 @@ providers:
   electricity:
     - "https://www.fortum.com/no/strom/stromavtale"
     - "https://www.forbrukerradet.no/strompris/"
+    - "https://www.lyse.no/strom"
   internet:
     - "https://www.telenor.no/privat/internett/"
     - "https://www.telia.no/internett/"
